@@ -1,0 +1,452 @@
+---
+title: "PROJECT_ASD"
+author: "Chris Chen"
+date: "4/10/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Preliminaries
+
+```{r}
+library(dplyr)
+library(table1)
+library(tidyverse)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(e1071)
+library(Metrics)
+library(caret)
+```
+
+
+## Data cleaning
+
+```{r}
+raw = read_csv("GSE113690_Autism_16S_rRNA_OTU_assignment_and_abundance.csv")
+df1 = raw %>% select(-c(OTU, taxonomy))
+otu_mapping = raw[, 1:2]
+```
+
+
+```{r}
+ASD = t(df1)
+colnames(ASD) = otu_mapping$OTU
+labs = rep(0, nrow(ASD))
+for (i in 1:nrow(ASD)) {
+  if (substr(row.names(ASD)[i], 0, 1) == "A") {
+    labs[i] = 1
+  }
+}
+ASD1 = as.data.frame(ASD)
+ASD1$outcome = as.factor(labs)
+```
+
+
+## Data Overview
+
+### Some Descriptive Statistics
+
+```{r}
+set.seed(579)
+samp = sample(1:1323, 9)
+ASD_samp = ASD1[, samp]
+table1::table1(~. , data = ASD_samp, caption = "Table 1: Descriptive Statistics")
+```
+
+
+### Some Visualization
+
+```{r}
+par(mfrow = c(3, 3))
+hist(ASD_samp[, 1], xlab = "abundance", main = "OTU860")
+hist(ASD_samp[, 2], xlab = "abundance", main = "OTU1073")
+hist(ASD_samp[, 3], xlab = "abundance", main = "OTU1264")
+hist(ASD_samp[, 4], xlab = "abundance", main = "OTU490")
+hist(ASD_samp[, 5], xlab = "abundance", main = "OTU762")
+hist(ASD_samp[, 6], xlab = "abundance", main = "OTU103")
+hist(ASD_samp[, 7], xlab = "abundance", main = "OTU534")
+hist(ASD_samp[, 8], xlab = "abundance", main = "OTU84")
+hist(ASD_samp[, 9], xlab = "abundance", main = "OTU1140")
+```
+
+
+### Distribution of Key Statistics
+
+```{r}
+means = sds = meds = maxs = rep(0, 1323)
+for (i in 1:1323) {
+  means[i] = mean(as.numeric(ASD1[, i]))
+  sds[i] = sd(as.numeric(ASD1[, i]))
+  meds[i] = median(as.numeric(ASD1[, i]))
+  maxs[i] = max(as.numeric(ASD1[, i]))
+}
+par(mfrow = c(2, 2))
+hist(means)
+hist(sds)
+hist(meds)
+hist(maxs)
+```
+
+
+## ML methods
+
+### Train-test split
+
+```{r}
+set.seed(500)
+train_ind = sample(1:nrow(ASD1), 204)
+train = ASD1[train_ind, ]
+test = ASD1[-train_ind, ]
+```
+
+
+### Random Forest
+
+```{r}
+set.seed(500)
+rf = randomForest(outcome ~ ., data = train)
+yhat = predict(rf, newdata = test)
+mean(abs(as.numeric(yhat) - as.numeric(test$outcome))) # test error: 0.06
+mean(abs(as.numeric(predict(rf, newdata = train)) - as.numeric(train$outcome))) # train error: 0
+confusionMatrix(yhat, test$outcome)
+```
+
+
+### Gradient Boost
+
+```{r, warning=FALSE}
+set.seed(500)
+gbm = gbm(outcome ~ ., data = train, distribution = "multinomial")
+pred = predict.gbm(object = gbm, newdata = test, type = "response")
+pred = as.data.frame(pred)
+yhat = apply(pred, 1, which.max) - 1
+mean(as.factor(yhat) != test$outcome) # test error: 0.08
+pred2 = predict.gbm(object = gbm, newdata = train, type = "response")
+pred2 = as.data.frame(pred2)
+yhat2 = apply(pred2, 1, which.max) - 1
+mean(as.factor(yhat2) != train$outcome) # train error: 0
+confusionMatrix(as.factor(yhat), test$outcome)
+```
+
+
+### XGBoost
+
+```{r}
+set.seed(500)
+nc = ncol(train)
+xgb_train = xgb.DMatrix(data = as.matrix(train[, -nc]), label =
+                          as.integer(train[, nc]) - 1)
+xgb_test = xgb.DMatrix(data = as.matrix(test[, -nc]), label =
+                         as.integer(test[, nc]) - 1)
+xgb_params = list(booster = "gbtree",
+  eta = 0.01,
+  max_depth = 8,
+  gamma = 0.4,
+  subsample = 0.7,
+  colsample_bytree = 1,
+  objective = "multi:softprob",
+  num_class = 2)
+xgb = xgb.train(params = xgb_params, data = xgb_train, nrounds = 500, verbose = 0)
+pred = predict(xgb, as.matrix(test[, -nc]), reshape = TRUE)
+pred = as.data.frame(pred)
+yhat = apply(pred, 1, which.max) - 1
+mean(as.factor(yhat) != test$outcome) # test error: 0.06
+pred2 = predict(xgb, as.matrix(train[, -nc]), reshape = TRUE)
+pred2 = as.data.frame(pred2)
+yhat2 = apply(pred2, 1, which.max) - 1
+mean(as.factor(yhat2) != train$outcome) # train error: 0
+confusionMatrix(as.factor(yhat), test$outcome)
+```
+
+
+### Support Vector Machine
+
+```{r}
+set.seed(500)
+svm1 = svm(outcome ~ ., data = train, type = "C", kernel = "linear", cost = 0.5, scale = F)
+summary(svm1)
+yhat = predict(svm1, test)
+mean(yhat != test$outcome) # test error: 0.24
+yhat2 = predict(svm1, train)
+mean(yhat2 != train$outcome) # test error: 0
+confusionMatrix(as.factor(yhat), test$outcome)
+```
+
+Possible explanation: SVM is distance based. Need to rescale. 
+
+Rescaling on sparse matrix is problematic--it's done on features, so for columns that have maximum value 0, we have 0/0 undefined. Therefore, rescaling is not done for all methods.
+
+
+### SVM reconstructed
+
+```{r}
+normalize2 = function(x) {
+  if (max(x) == 0) {
+    return(rep(0, length(x)))
+  } else {
+    return(x / max(x))
+  }
+}
+train_norm = as.data.frame(apply(train[, -nc], 2, normalize2))
+# train_norm$outcome = as.factor(labs[train_ind])
+test_norm = as.data.frame(apply(test[, -nc], 2, normalize2))
+# test_norm$outcome = as.factor(labs[-train_ind])
+```
+
+```{r}
+set.seed(500)
+svm2 = svm(x = as.matrix(train_norm), y = as.factor(labs[train_ind]), type = "C", kernel = "linear", cost = 0.5, scale = F)
+summary(svm2)
+yhat = predict(svm2, test_norm)
+mean(yhat != labs[-train_ind]) # test error: 0.06
+yhat2 = predict(svm2, train_norm)
+mean(yhat2 != labs[train_ind]) # test error: 0
+confusionMatrix(as.factor(yhat), test$outcome)
+```
+
+
+## Feature Importance
+
+### Random Forest
+
+```{r}
+imp = data.frame(importance(rf))
+imp2 = cbind("OTU" = rownames(imp), imp)
+imp3 = imp2[order(imp$MeanDecreaseGini, decreasing = T), ]
+head(imp3, n = 10L)
+varImpPlot(rf)
+```
+
+
+### Gradient Boost
+
+```{r}
+gbm_imp_mat = summary.gbm(gbm)
+gbm_imp_mat[1:50, ]
+```
+
+
+### XGBoost
+
+```{r}
+imp_mat = xgb.importance(colnames(train[, -nc]), model = xgb)
+head(imp_mat, n = 10L)
+xgb.plot.importance(imp_mat[1:10, ])
+```
+
+
+### SVM
+
+```{r}
+w = t(svm2$coefs) %*% svm2$SV                 # weight vectors
+w = apply(w, 2, function(v){sqrt(sum(v^2))})  # weight
+w = sort(w, decreasing = T)
+w[1:10]
+```
+
+
+## Feature Extraction with UMAP
+
+```{r}
+library(uwot)
+nc = ncol(ASD1)
+# manifold projection for training
+umap = umap(ASD1[, -nc], n_components = 100, metric = "manhattan")
+ASD_map1 = as.data.frame(cbind(umap, outcome = as.factor(labs)))
+```
+
+
+## Re-runs
+
+### Train-test split
+
+```{r}
+set.seed(500)
+train_ind = sample(1:nrow(ASD_map1), 204)
+train = ASD_map1[train_ind, ]
+test = ASD_map1[-train_ind, ]
+```
+
+
+### RF
+
+```{r}
+set.seed(500)
+rf = randomForest(outcome ~ ., data = train)
+yhat = predict(rf, newdata = test)
+mean(abs(as.numeric(yhat) - as.numeric(test$outcome))) # test error: 0.06
+mean(abs(as.numeric(predict(rf, newdata = train)) - as.numeric(train$outcome)))
+```
+
+Feature extraction is not recommended. The largest problem: interpretability. Since one of our goals is to identify the most important/influential OTUs, it's not desirable to combine the OTUs to form new entities. Besides this problem, the result gives is pretty bad--the accuracy is around 0.6 for all models. 
+
+
+## Feature Selection using the importance
+
+Usually we do it after splitting as there can be information leakage, if done before, from the whole dataset. Many common packages on the internet uses the feature importance in tree-based algorithm packages, that's why our pool of influential features can be of help.
+
+
+### Pool of features 
+
+```{r}
+rf_fi = imp3$OTU[1:10]
+gbm_fi = summary.gbm(gbm)[1:10, ]$var
+xgb_fi = imp_mat$Feature[1:10]
+svm_fi = names(w[1:10])
+pool = union(union(rf_fi, gbm_fi), union(xgb_fi, svm_fi))
+```
+
+```{r}
+pool_ind = c()
+for (i in 1:length(pool)) {
+  for (j in 1:ncol(ASD)) {
+    if (colnames(ASD)[j] == pool[i]) {
+      pool_ind = append(pool_ind, j)
+    }
+  }
+}
+ASD1_selected = ASD1[, c(pool_ind, ncol(ASD)+1)]
+```
+
+
+### Train test split
+
+```{r}
+set.seed(500)
+train_ind = sample(1:nrow(ASD1_selected), 204)
+train = ASD1_selected[train_ind, ]
+test = ASD1_selected[-train_ind, ]
+```
+
+
+### RF
+
+```{r}
+set.seed(500)
+rf = randomForest(outcome ~ ., data = train)
+yhat = predict(rf, newdata = test)
+mean(abs(as.numeric(yhat) - as.numeric(test$outcome)))
+mean(abs(as.numeric(predict(rf, newdata = train)) - as.numeric(train$outcome)))
+```
+
+Okay...unexpected. But magical. Still overfits? I wouldn't call it overfitting. I would call it supremacy. With only 27 features we can arrive at 92% accuracy, that is really impressive. Only 27 out of 1322 features are important (and necessary) to make a prediction!
+
+
+### GB
+
+```{r}
+set.seed(500)
+gbm = gbm(outcome ~ ., data = train, distribution = "multinomial")
+pred = predict.gbm(object = gbm, newdata = test, type = "response")
+pred = as.data.frame(pred)
+yhat = apply(pred, 1, which.max) - 1
+mean(as.factor(yhat) != test$outcome)
+pred2 = predict.gbm(object = gbm, newdata = train, type = "response")
+pred2 = as.data.frame(pred2)
+yhat2 = apply(pred2, 1, which.max) - 1
+mean(as.factor(yhat2) != train$outcome)
+```
+
+
+### XGB
+
+```{r}
+set.seed(500)
+nc = ncol(train)
+xgb_train = xgb.DMatrix(data = as.matrix(train[, -nc]), label =
+                          as.integer(train[, nc]) - 1)
+xgb_test = xgb.DMatrix(data = as.matrix(test[, -nc]), label =
+                         as.integer(test[, nc]) - 1)
+xgb_params = list(booster = "gbtree",
+  eta = 0.01,
+  max_depth = 8,
+  gamma = 0.4,
+  subsample = 0.7,
+  colsample_bytree = 1,
+  objective = "multi:softprob",
+  num_class = 2)
+xgb = xgb.train(params = xgb_params, data = xgb_train, nrounds = 500, verbose = 0)
+pred = predict(xgb, as.matrix(test[, -nc]), reshape = TRUE)
+pred = as.data.frame(pred)
+yhat = apply(pred, 1, which.max) - 1
+mean(as.factor(yhat) != test$outcome) 
+pred2 = predict(xgb, as.matrix(train[, -nc]), reshape = TRUE)
+pred2 = as.data.frame(pred2)
+yhat2 = apply(pred2, 1, which.max) - 1
+mean(as.factor(yhat2) != train$outcome) 
+```
+
+
+### SVM
+
+```{r}
+set.seed(500)
+train_norm = as.data.frame(apply(train[, -nc], 2, normalize2))
+# train_norm$outcome = as.factor(labs[train_ind])
+test_norm = as.data.frame(apply(test[, -nc], 2, normalize2))
+# test_norm$outcome = as.factor(labs[-train_ind])
+svm2 = svm(x = as.matrix(train_norm), y = as.factor(labs[train_ind]), type = "C", kernel = "linear", cost = 0.5, scale = F)
+summary(svm2)
+yhat = predict(svm2, test_norm)
+mean(yhat != labs[-train_ind])
+yhat2 = predict(svm2, train_norm)
+mean(yhat2 != labs[train_ind])
+```
+
+A bit poorer performance since SVM did not agree much with the other three methods and hence did not treat many of the OTUs in the pool to be important. 0.12 training error rate and 0.18 test error rate.
+
+However, we can see that using a smaller set of features did not improve our test accuracy. Does it mean the original set of features are not "overfitting", since the generalization potential is worsened through using the selected few? Maybe not. We can only find out using larger pools.
+
+
+```{r}
+set.seed(579)
+num_f = seq(10, 500, by = 10)
+pool_size = rep(0, 50)
+test_err = rep(0, 50)
+train_err = rep(0, 50)
+for (k in 1:length(num_f)) {
+  rf_fi = imp3$OTU[1:num_f[k]][!is.na(imp3$OTU[1:num_f[k]])]
+  gbm_fi = gbm_imp_mat[1:num_f[k], ]$var
+  xgb_fi = imp_mat$Feature[1:num_f[k]]
+  svm_fi = names(w[1:num_f[k]])
+  pool = union(union(rf_fi, gbm_fi), union(xgb_fi, svm_fi))
+  pool_size[k] = length(pool)
+  # print(pool)
+  # print(which(is.na(pool)))
+  pool_ind = c()
+  for (i in 1:length(pool)) {
+    for (j in 1:ncol(ASD)) {
+      # print(pool[i])
+      if (colnames(ASD)[j] == pool[i]) {
+        pool_ind = append(pool_ind, j)
+      }
+    }
+  }
+  ASD1_selected = ASD1[, c(pool_ind, ncol(ASD)+1)]
+  train = ASD1_selected[train_ind, ]
+  test = ASD1_selected[-train_ind, ]
+  rf = randomForest(outcome ~ ., data = train)
+  yhat = predict(rf, newdata = test)
+  test_err[k] = mean(abs(as.numeric(yhat) - as.numeric(test$outcome)))
+  train_err[k] = mean(abs(as.numeric(predict(rf, newdata = train)) -
+                            as.numeric(train$outcome)))
+}
+```
+
+
+```{r}
+plot(x = pool_size, y = test_err, type = "l")
+min(test_err)
+test_err
+pool_size
+```
+
+0.04 is the minimum test error rate we can get, slightly lower than that of using the full model. So, the full model had a little bit of overfitting problem in the beginning. We can repeat this process and study the convergence of other methods as well!
+
+
